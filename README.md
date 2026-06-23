@@ -14,30 +14,34 @@ tmux cheat sheet  (prefix: Ctrl+b)
 
 ## Installation
 
-### Option A — editable install (recommended for development)
+Requires [uv](https://docs.astral.sh/uv/). If you don't have it:
 
 ```sh
-git clone https://github.com/yourname/tmux-cheat-sheet-util
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+### System-wide install (recommended)
+
+```sh
+git clone https://github.com/Rickyf115/tmux-cheat-sheet-util
 cd tmux-cheat-sheet-util
-pip install -e .
+./install.sh
 ```
 
-The `tmux-cheat` command is now on your `PATH`.
+`install.sh` will install uv if it isn't already present, then run
+`uv tool install .` to put `tmux-cheat` on your `PATH`.
 
-### Option B — install into a virtual environment
+### Development setup
 
 ```sh
-python -m venv ~/.venvs/tmux-cheat
-~/.venvs/tmux-cheat/bin/pip install .
-# optionally symlink into your PATH:
-ln -s ~/.venvs/tmux-cheat/bin/tmux-cheat ~/.local/bin/tmux-cheat
+git clone https://github.com/Rickyf115/tmux-cheat-sheet-util
+cd tmux-cheat-sheet-util
+uv venv
+uv sync
+source .venv/bin/activate
 ```
 
-### Option C — pipx (isolated, no venv setup)
-
-```sh
-pipx install .
-```
+`uv sync` installs the project and all dev dependencies into the local `.venv`.
 
 ## Usage
 
@@ -136,7 +140,5 @@ set -Ux TMUX_PREFIX 'Ctrl+a'
 ## Uninstall
 
 ```sh
-pip uninstall tmux-cheat
-# or, if installed with pipx:
-pipx uninstall tmux-cheat
+uv tool uninstall tmux-cheat
 ```
