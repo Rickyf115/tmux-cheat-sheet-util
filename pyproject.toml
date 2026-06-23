@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "tmux-cheat"
@@ -13,6 +13,10 @@ license = { text = "MIT" }
 [project.scripts]
 tmux-cheat = "tmux_cheat.cli:main"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["tmux_cheat*"]
+[dependency-groups]
+dev = [
+    "hatchling",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["tmux_cheat"]
