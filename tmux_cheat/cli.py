@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 import argparse
+import copy
 import os
 import shutil
 import sys
+from pathlib import Path
 
 from .cheatsheet import SECTIONS
+from .config import COMMAND_DESCRIPTIONS, find_config_file, parse_config
 
 # ---------------------------------------------------------------------------
 # ANSI helpers
@@ -33,15 +36,92 @@ class _Colors:
 
 
 # ---------------------------------------------------------------------------
+# Config-driven overrides
+# ---------------------------------------------------------------------------
+
+def _apply_config_overrides(sections: list, config: dict) -> tuple[list, list]:
+    """
+    Return (updated_sections, extra_entries) where:
+    - updated_sections has default keys replaced by the user's custom bindings
+    - extra_entries is a list of (key, description) for no-prefix or fully custom
+      bindings that don't map to any existing cheat sheet entry
+    """
+    cmd_to_key = config.get("cmd_to_key", {})
+    cmd_to_no_prefix = config.get("cmd_to_no_prefix", {})
+    unbound = config.get("unbound", set())
+
+    # Track which commands were consumed by existing entries so we can show
+    # the remainder as a "Custom Bindings" section.
+    used_commands: set[str] = set()
+
+    result = []
+    for section in sections:
+        new_entries = []
+        for entry in section["entries"]:
+            key_tmpl, desc = entry[0], entry[1]
+            cmd = entry[2] if len(entry) > 2 else None
+
+            if cmd:
+                used_commands.add(cmd)
+                if cmd in cmd_to_key:
+                    # User rebound this command to a new key with prefix.
+                    new_key = key_tmpl.replace(
+                        key_tmpl.split()[-1],  # replace the trailing default key
+                        cmd_to_key[cmd],
+                    )
+                    # Safer: preserve {prefix} if it was there, swap just the key part.
+                    if key_tmpl.startswith("{prefix}"):
+                        new_key = "{prefix} " + cmd_to_key[cmd]
+                    else:
+                        new_key = cmd_to_key[cmd]
+                    new_entries.append((new_key, desc))
+                    continue
+                if cmd in cmd_to_no_prefix:
+                    # Command is now bound without a prefix.
+                    new_entries.append((cmd_to_no_prefix[cmd], desc))
+                    continue
+                # Check if the default key was explicitly unbound.
+                default_key = key_tmpl.split()[-1]  # e.g. "%" from "{prefix} %"
+                if default_key in unbound:
+                    continue  # omit removed bindings
+            new_entries.append(entry[:2])
+
+        if new_entries:
+            result.append({**section, "entries": new_entries})
+
+    # Collect custom no-prefix bindings not already mapped to a cheat sheet entry.
+    extra: list[tuple[str, str]] = []
+    for cmd, key in cmd_to_no_prefix.items():
+        if cmd in used_commands:
+            continue
+        desc = COMMAND_DESCRIPTIONS.get(cmd, cmd)
+        extra.append((key, desc))
+
+    # Collect custom prefix bindings for commands not in the default cheat sheet.
+    for cmd, key in cmd_to_key.items():
+        if cmd in used_commands:
+            continue
+        # Skip internal plumbing like send-prefix
+        if cmd in ("send-prefix",):
+            continue
+        desc = COMMAND_DESCRIPTIONS.get(cmd, cmd)
+        extra.append(("{prefix} " + key, desc))
+
+    return result, extra
+
+
+# ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
 
-def _resolve_prefix(cli_prefix: str | None) -> str:
+def _resolve_prefix(cli_prefix: str | None, config_prefix: str | None) -> str:
     if cli_prefix:
         return cli_prefix
     env = os.environ.get("TMUX_PREFIX")
     if env:
         return env
+    if config_prefix:
+        return config_prefix
     return "Ctrl+b"
 
 
@@ -53,7 +133,6 @@ def _render_sections(sections: list, prefix: str, colors: _Colors, term_width: i
         bar = "─" * bar_len
         print(colors.header(f"{bar}{title}{bar}"))
 
-        # Find the longest key string so we can align descriptions.
         entries = [(k.replace("{prefix}", prefix), d) for k, d in section["entries"]]
         max_key = max(len(k) for k, _ in entries)
 
@@ -61,6 +140,23 @@ def _render_sections(sections: list, prefix: str, colors: _Colors, term_width: i
             padding = " " * (max_key - len(key))
             print(f"  {colors.key(key)}{padding}  {colors.dim('│')}  {colors.desc(desc)}")
 
+    print()
+
+
+def _render_extra(entries: list, prefix: str, colors: _Colors, term_width: int) -> None:
+    if not entries:
+        return
+    print()
+    title = " Custom Bindings "
+    bar_len = max(0, (term_width - len(title)) // 2)
+    bar = "─" * bar_len
+    print(colors.header(f"{bar}{title}{bar}"))
+
+    resolved = [(k.replace("{prefix}", prefix), d) for k, d in entries]
+    max_key = max(len(k) for k, _ in resolved)
+    for key, desc in resolved:
+        padding = " " * (max_key - len(key))
+        print(f"  {colors.key(key)}{padding}  {colors.dim('│')}  {colors.desc(desc)}")
     print()
 
 
@@ -87,13 +183,15 @@ def main() -> None:
             "Prefix key resolution order (first wins):\n"
             "  1. --prefix flag\n"
             "  2. TMUX_PREFIX environment variable\n"
-            "  3. Default: Ctrl+b\n\n"
+            "  3. ~/.tmux.conf  (or ~/.config/tmux/tmux.conf)\n"
+            "  4. Default: Ctrl+b\n\n"
             "Examples:\n"
-            "  tmux-cheat                       # show everything\n"
-            "  tmux-cheat sessions windows      # show specific categories\n"
-            "  tmux-cheat --prefix Ctrl+a       # override prefix key once\n"
-            "  TMUX_PREFIX=Ctrl+a tmux-cheat    # override prefix key persistently\n"
-            "  tmux-cheat --list                # list available categories\n"
+            "  tmux-cheat                        # show everything\n"
+            "  tmux-cheat sessions windows       # show specific categories\n"
+            "  tmux-cheat --prefix Ctrl+a        # override prefix key once\n"
+            "  tmux-cheat --config ~/my.conf     # use a specific config file\n"
+            "  tmux-cheat --no-config            # ignore tmux config file\n"
+            "  tmux-cheat --list                 # list available categories\n"
         ),
     )
     parser.add_argument(
@@ -106,9 +204,19 @@ def main() -> None:
         "--prefix",
         metavar="KEY",
         help=(
-            "prefix key to show in shortcuts (overrides TMUX_PREFIX env var). "
+            "prefix key to show in shortcuts (overrides config file and TMUX_PREFIX). "
             "Example: --prefix 'Ctrl+a'"
         ),
+    )
+    parser.add_argument(
+        "--config",
+        metavar="FILE",
+        help="path to tmux config file (default: ~/.tmux.conf)",
+    )
+    parser.add_argument(
+        "--no-config",
+        action="store_true",
+        help="ignore tmux config file; use defaults only",
     )
     parser.add_argument(
         "--list", "-l",
@@ -129,7 +237,22 @@ def main() -> None:
         _list_categories(colors)
         return
 
-    prefix = _resolve_prefix(args.prefix)
+    # Load tmux config unless suppressed.
+    tmux_config: dict = {}
+    config_path: Path | None = None
+
+    if not args.no_config:
+        if args.config:
+            config_path = Path(args.config).expanduser()
+            if not config_path.exists():
+                parser.error(f"Config file not found: {config_path}")
+        else:
+            config_path = find_config_file()
+
+        if config_path:
+            tmux_config = parse_config(config_path)
+
+    prefix = _resolve_prefix(args.prefix, tmux_config.get("prefix"))
 
     valid_slugs = {s["slug"] for s in SECTIONS}
     if args.categories:
@@ -141,12 +264,15 @@ def main() -> None:
             )
         sections = [s for s in SECTIONS if s["slug"] in set(args.categories)]
     else:
-        sections = SECTIONS
+        sections = list(SECTIONS)
 
-    print(
-        colors.bold("tmux cheat sheet")
-        + colors.dim(f"  (prefix: {colors.key(prefix)})")
-    )
+    sections, extra_entries = _apply_config_overrides(sections, tmux_config)
+
+    header = colors.bold("tmux cheat sheet") + colors.dim(f"  (prefix: {colors.key(prefix)})")
+    if config_path:
+        header += colors.dim(f"  [{config_path}]")
+    print(header)
     print(colors.dim("source: https://tmuxcheatsheet.com/"))
 
     _render_sections(sections, prefix, colors, term_width)
+    _render_extra(extra_entries, prefix, colors, term_width)
