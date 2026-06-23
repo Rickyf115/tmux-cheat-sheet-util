@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tmux-cheat"
+version = "1.0.0"
+description = "tmux keyboard shortcuts and command cheat sheet CLI"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+[project.scripts]
+tmux-cheat = "tmux_cheat.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tmux_cheat*"]
